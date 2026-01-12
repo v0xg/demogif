@@ -43,3 +43,16 @@ release:
   github:
     owner: v0xg
     name: demogif
+
+brews:
+  - repository:
+      owner: v0xg
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/v0xg/demogif"
+    description: "CLI tool to generate animated GIFs of web interactions using AI"
+    license: "MIT"
+    install: |
+      bin.install "demogif"
+    test: |
+      system "#{bin}/demogif", "--help"
