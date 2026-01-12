@@ -11,10 +11,11 @@ import (
 
 // Options configures the crawler behavior
 type Options struct {
-	Width   int
-	Height  int
-	Timeout time.Duration
-	Verbose bool
+	Width      int
+	Height     int
+	Timeout    time.Duration
+	Verbose    bool
+	ProfileDir string // Chrome/Chromium profile directory for authenticated sessions
 }
 
 // Browser wraps the Rod browser and page for reuse
@@ -38,6 +39,42 @@ func (b *Browser) Page() *rod.Page {
 	return b.page
 }
 
+// ReCrawl extracts a fresh PageMap from the current browser page state
+// Used after checkpoint actions to get updated elements
+func (b *Browser) ReCrawl() (*PageMap, error) {
+	page := b.page
+
+	// Wait for any pending navigation/content to settle
+	page.MustWaitLoad()
+
+	// Wait for network idle with timeout (don't hang on persistent connections)
+	page.Timeout(5 * time.Second).WaitRequestIdle(500*time.Millisecond, nil, nil, nil)()
+
+	// Wait for interactive elements to appear (SPAs need time to render new content)
+	waitForInteractiveElements(page, 5*time.Second)
+
+	// Extract current URL and title
+	url := page.MustEval(`() => window.location.href`).String()
+	title := page.MustEval(`() => document.title`).String()
+
+	// Detect if SPA
+	isSPA := detectSPA(page)
+
+	// Extract interactive elements
+	elements := extractElements(page)
+
+	// Extract navigation
+	navigation := extractNavigation(page)
+
+	return &PageMap{
+		URL:        url,
+		Title:      title,
+		Elements:   elements,
+		Navigation: navigation,
+		IsSPA:      isSPA,
+	}, nil
+}
+
 // Crawl navigates to a URL and extracts page structure
 func Crawl(url string, opts Options) (*PageMap, *Browser, error) {
 	if opts.Timeout == 0 {
@@ -46,7 +83,13 @@ func Crawl(url string, opts Options) (*PageMap, *Browser, error) {
 
 	// Launch headless browser
 	path, _ := launcher.LookPath()
-	u := launcher.New().Bin(path).Headless(true).MustLaunch()
+	l := launcher.New().Bin(path).Headless(true)
+
+	if opts.ProfileDir != "" {
+		l = l.UserDataDir(opts.ProfileDir)
+	}
+
+	u := l.MustLaunch()
 	browser := rod.New().ControlURL(u).MustConnect()
 
 	page := browser.MustPage(url)
@@ -58,14 +101,16 @@ func Crawl(url string, opts Options) (*PageMap, *Browser, error) {
 	page.MustWaitLoad()
 
 	// Wait for network to be idle (important for SPAs)
-	page.MustWaitRequestIdle()
+	// Use timeout to avoid hanging on persistent connections (WebSockets, polling, etc.)
+	page.Timeout(5 * time.Second).WaitRequestIdle(500*time.Millisecond, nil, nil, nil)()
 
 	// Detect if SPA
 	isSPA := detectSPA(page)
 
-	// If SPA, wait a bit more for hydration
+	// If SPA, wait for interactive elements to appear (Next.js/React apps need time to
+	// download JS bundles, hydrate, and potentially fetch client-side data)
 	if isSPA {
-		time.Sleep(500 * time.Millisecond)
+		waitForInteractiveElements(page, 5*time.Second)
 	}
 
 	// Extract page info
@@ -86,6 +131,33 @@ func Crawl(url string, opts Options) (*PageMap, *Browser, error) {
 	}
 
 	return pageMap, &Browser{browser: browser, page: page}, nil
+}
+
+// waitForInteractiveElements polls until interactive elements appear or timeout
+func waitForInteractiveElements(page *rod.Page, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	checkInterval := 200 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		count := page.MustEval(`() => {
+			const buttons = document.querySelectorAll('button, [role="button"], input[type="submit"]');
+			const inputs = document.querySelectorAll('input:not([type="hidden"]), textarea');
+			const links = document.querySelectorAll('a[href]');
+			let visible = 0;
+			buttons.forEach(el => { if (el.offsetParent) visible++; });
+			inputs.forEach(el => { if (el.offsetParent) visible++; });
+			links.forEach(el => { if (el.offsetParent) visible++; });
+			return visible;
+		}`).Int()
+
+		if count > 0 {
+			// Found elements, wait a tiny bit more for any final renders
+			time.Sleep(300 * time.Millisecond)
+			return
+		}
+
+		time.Sleep(checkInterval)
+	}
 }
 
 // detectSPA checks if the page is a Single Page Application

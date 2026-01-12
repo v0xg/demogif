@@ -75,9 +75,54 @@ func (p *OpenAIProvider) GenerateActions(pageMap *crawler.PageMap, prompt string
 
 	responseText := resp.Choices[0].Message.Content
 
-	// Parse JSON response
-	var actions []executor.Action
-	if err := json.Unmarshal([]byte(responseText), &actions); err != nil {
+	// Parse JSON response (extract JSON array if surrounded by text)
+	actions, err := parseActionsJSON(responseText)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse OpenAI response as JSON: %w\nResponse: %s", err, responseText)
+	}
+
+	return actions, nil
+}
+
+// ContinueActions generates the next batch of actions after a checkpoint
+func (p *OpenAIProvider) ContinueActions(pageMap *crawler.PageMap, originalPrompt string, completedActions string) ([]executor.Action, error) {
+	pageMapJSON, err := json.MarshalIndent(pageMap, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal page map: %w", err)
+	}
+
+	userPrompt := buildContinuePrompt(string(pageMapJSON), originalPrompt, completedActions)
+
+	resp, err := p.client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: p.model,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: systemPrompt,
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: userPrompt,
+				},
+			},
+			MaxTokens: 1024,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("OpenAI API error: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("empty response from OpenAI")
+	}
+
+	responseText := resp.Choices[0].Message.Content
+
+	// Parse JSON response (extract JSON array if surrounded by text)
+	actions, err := parseActionsJSON(responseText)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI response as JSON: %w\nResponse: %s", err, responseText)
 	}
 

@@ -10,6 +10,7 @@ import (
 // Provider defines the interface for AI action generation
 type Provider interface {
 	GenerateActions(pageMap *crawler.PageMap, prompt string) ([]executor.Action, error)
+	ContinueActions(pageMap *crawler.PageMap, originalPrompt string, completedActions string) ([]executor.Action, error)
 }
 
 // NewProvider creates a new AI provider based on the provider name

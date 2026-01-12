@@ -26,7 +26,89 @@ type FrameData struct {
 	Cursor CursorPosition
 }
 
+// ExecuteResult holds the result of executing a batch of actions
+type ExecuteResult struct {
+	Frames          []image.Image
+	CursorPositions []CursorPosition
+	LastCursor      CursorPosition
+	HitCheckpoint   bool
+	CheckpointIndex int // Index of the checkpoint action that was hit (-1 if none)
+}
+
+// ExecuteBatch runs actions until a checkpoint is hit or all actions complete
+// Returns frames, positions, and whether a checkpoint was encountered
+func ExecuteBatch(browser *crawler.Browser, actions []Action, opts Options, startCursor *CursorPosition) (*ExecuteResult, error) {
+	page := browser.Page()
+	var frameData []FrameData
+
+	// Frame timing based on FPS
+	frameInterval := time.Duration(1000/opts.FPS) * time.Millisecond
+
+	// Current cursor position
+	currentCursor := CursorPosition{X: 640, Y: 360, State: CursorDefault}
+	if startCursor != nil {
+		currentCursor = *startCursor
+	}
+
+	result := &ExecuteResult{
+		CheckpointIndex: -1,
+	}
+
+	for i, action := range actions {
+		if opts.Verbose {
+			fmt.Printf("  [%d/%d] %s %s", i+1, len(actions), action.Type, action.Selector)
+		}
+
+		// Execute the action with animation
+		newFrames, newCursor, err := executeActionAnimated(page, action, currentCursor, opts, frameInterval)
+		if err != nil {
+			if opts.Verbose {
+				fmt.Printf(" ✗ (%v)\n", err)
+			}
+			continue
+		}
+
+		if opts.Verbose {
+			if action.Checkpoint {
+				fmt.Println(" ✓ [checkpoint]")
+			} else {
+				fmt.Println(" ✓")
+			}
+		}
+
+		frameData = append(frameData, newFrames...)
+		currentCursor = newCursor
+
+		// Post-action wait with frame capture
+		waitTime := action.Duration
+		if waitTime == 0 {
+			waitTime = opts.BaseDelay
+		}
+		waitFrames := captureWaitFrames(page, currentCursor, waitTime, frameInterval)
+		frameData = append(frameData, waitFrames...)
+
+		// If this was a checkpoint, stop and signal re-crawl needed
+		if action.Checkpoint {
+			result.HitCheckpoint = true
+			result.CheckpointIndex = i
+			break
+		}
+	}
+
+	// Extract images and positions
+	result.Frames = make([]image.Image, len(frameData))
+	result.CursorPositions = make([]CursorPosition, len(frameData))
+	for i, fd := range frameData {
+		result.Frames[i] = fd.Image
+		result.CursorPositions[i] = fd.Cursor
+	}
+	result.LastCursor = currentCursor
+
+	return result, nil
+}
+
 // Execute runs the action sequence and captures frames with animation
+// Deprecated: Use ExecuteBatch for checkpoint support
 func Execute(browser *crawler.Browser, actions []Action, opts Options) ([]image.Image, []CursorPosition, error) {
 	page := browser.Page()
 	var frameData []FrameData
@@ -405,7 +487,7 @@ func getElementCenter(el *rod.Element) (int, int, error) {
 
 func captureFrame(page *rod.Page) (image.Image, error) {
 	quality := 90
-	data, err := page.Screenshot(true, &proto.PageCaptureScreenshot{
+	data, err := page.Screenshot(false, &proto.PageCaptureScreenshot{
 		Format:  proto.PageCaptureScreenshotFormatPng,
 		Quality: &quality,
 	})

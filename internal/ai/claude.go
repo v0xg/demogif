@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -76,10 +77,100 @@ func (p *ClaudeProvider) GenerateActions(pageMap *crawler.PageMap, prompt string
 		return nil, fmt.Errorf("empty response from Claude")
 	}
 
-	// Parse JSON response
-	var actions []executor.Action
-	if err := json.Unmarshal([]byte(responseText), &actions); err != nil {
+	// Parse JSON response (extract JSON array if surrounded by text)
+	actions, err := parseActionsJSON(responseText)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse Claude response as JSON: %w\nResponse: %s", err, responseText)
+	}
+
+	return actions, nil
+}
+
+// ContinueActions generates the next batch of actions after a checkpoint
+func (p *ClaudeProvider) ContinueActions(pageMap *crawler.PageMap, originalPrompt string, completedActions string) ([]executor.Action, error) {
+	pageMapJSON, err := json.MarshalIndent(pageMap, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal page map: %w", err)
+	}
+
+	userPrompt := buildContinuePrompt(string(pageMapJSON), originalPrompt, completedActions)
+
+	resp, err := p.client.Messages.New(context.Background(), anthropic.MessageNewParams{
+		Model:     anthropic.Model(p.model),
+		MaxTokens: 1024,
+		System: []anthropic.TextBlockParam{
+			{Text: systemPrompt},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(userPrompt)),
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("Claude API error: %w", err)
+	}
+
+	// Extract text content
+	var responseText string
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			responseText = block.Text
+			break
+		}
+	}
+
+	if responseText == "" {
+		return nil, fmt.Errorf("empty response from Claude")
+	}
+
+	// Parse JSON response (extract JSON array if surrounded by text)
+	actions, err := parseActionsJSON(responseText)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Claude response as JSON: %w\nResponse: %s", err, responseText)
+	}
+
+	return actions, nil
+}
+
+// parseActionsJSON extracts and parses a JSON array from a response that may contain surrounding text
+func parseActionsJSON(response string) ([]executor.Action, error) {
+	// First try direct parsing
+	var actions []executor.Action
+	if err := json.Unmarshal([]byte(response), &actions); err == nil {
+		return actions, nil
+	}
+
+	// Find JSON array in response (look for [ ... ])
+	start := strings.Index(response, "[")
+	if start == -1 {
+		return nil, fmt.Errorf("no JSON array found in response")
+	}
+
+	// Find matching closing bracket
+	depth := 0
+	end := -1
+	for i := start; i < len(response); i++ {
+		switch response[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+		if end != -1 {
+			break
+		}
+	}
+
+	if end == -1 {
+		return nil, fmt.Errorf("no matching closing bracket found")
+	}
+
+	jsonStr := response[start:end]
+	if err := json.Unmarshal([]byte(jsonStr), &actions); err != nil {
+		return nil, fmt.Errorf("failed to parse extracted JSON: %w", err)
 	}
 
 	return actions, nil
