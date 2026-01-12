@@ -10,30 +10,6 @@ CLI tool to generate animated GIFs of web interactions using AI.
 brew install v0xg/tap/demogif
 ```
 
-### Download Binary
-
-Download the appropriate archive for your system from the [releases page](https://github.com/v0xg/demogif/releases):
-
-| Platform | File |
-|----------|------|
-| macOS (Apple Silicon) | `demogif_*_darwin_arm64.tar.gz` |
-| macOS (Intel) | `demogif_*_darwin_amd64.tar.gz` |
-| Linux (x64) | `demogif_*_linux_amd64.tar.gz` |
-| Linux (ARM64) | `demogif_*_linux_arm64.tar.gz` |
-| Windows (x64) | `demogif_*_windows_amd64.zip` |
-
-Then extract and move to your PATH:
-
-```bash
-# macOS/Linux
-tar xzf demogif_*.tar.gz
-sudo mv demogif /usr/local/bin/
-
-# Windows (PowerShell)
-Expand-Archive demogif_*.zip -DestinationPath .
-Move-Item demogif.exe C:\Windows\System32\
-```
-
 ### Go Install
 
 Requires Go 1.23+:
