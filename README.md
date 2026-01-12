@@ -2,6 +2,10 @@
 
 CLI tool to generate animated GIFs of web interactions using AI.
 
+![Demo](docs/demo.gif)
+
+*Prompt: "create a new set, fill the learning set name with 'llms', generate the set, click generate intermediate exercises, then open an exercise"*
+
 ## Install
 
 ### Homebrew (macOS/Linux)
@@ -32,6 +36,13 @@ go build -o demogif ./cmd/demogif
 demogif "https://example.com" "click the button, fill the form"
 ```
 
+For authenticated sessions, close your browser first, then use its profile directory (parent dir, not `Default/`):
+```bash
+demogif --profile ~/.config/chromium "https://myapp.com" "create a new item, fill the form, submit"
+```
+
+Multi-page workflows are handled automatically—just describe what you want to do.
+
 ### Flags
 
 | Flag | Default | Description |
@@ -44,6 +55,7 @@ demogif "https://example.com" "click the button, fill the form"
 | `--provider` | `claude` | AI provider: `claude` or `openai` |
 | `--model` | - | Specific model override |
 | `--no-cursor` | `false` | Disable cursor overlay |
+| `--profile` | - | Chrome profile directory for authenticated sessions |
 | `-v, --verbose` | `false` | Show detailed progress |
 
 ## Configuration

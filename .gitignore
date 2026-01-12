@@ -4,6 +4,7 @@
 
 # Output files
 *.gif
+!docs/demo.gif
 
 # Environment (keep .env.example)
 .env
