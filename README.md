@@ -16,7 +16,7 @@ brew install v0xg/tap/demogif
 
 ### Go Install
 
-Requires Go 1.23+:
+Requires Go 1.25+:
 
 ```bash
 go install github.com/v0xg/demogif/cmd/demogif@latest

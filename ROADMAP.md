@@ -15,12 +15,12 @@
 
 ## Phase 2: Safety net
 
-- [ ] Tests: `parseActionsJSON`, cursor drawing, executor against a local HTML page in headless Chromium
-- [ ] CI on pull requests (build, `go vet`, `go test`); today CI only runs on release tags
+- [x] Tests: `parseActionsJSON`, cursor drawing, crawler and executor against a local page in headless Chromium
+- [x] CI on pull requests and `main` (gofmt, build, `go vet`, `go test -race`)
 - [x] Fix the `go vet` warning and remove dead code (`GetElementType`, `GetElementPosition`)
 - [ ] Remove remaining `Must*` calls in the crawler; always close the browser on error
 - [ ] Timeouts and retries on AI API calls; update the default Claude model
-- [ ] Align Go version across README (1.23+), `go.mod` (1.25.5) and the release workflow (1.23)
+- [x] Align Go version: README, CI and release all follow `go.mod`
 
 ## Phase 3: Smarter automation
 

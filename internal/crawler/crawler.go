@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"os"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -46,7 +47,7 @@ func (b *Browser) ReCrawl() (*PageMap, error) {
 	page.MustWaitLoad()
 
 	// Wait for network idle with timeout (don't hang on persistent connections)
-	page.Timeout(5 * time.Second).WaitRequestIdle(500*time.Millisecond, nil, nil, nil)()
+	page.Timeout(5*time.Second).WaitRequestIdle(500*time.Millisecond, nil, nil, nil)()
 
 	// Wait for interactive elements to appear (SPAs need time to render new content)
 	waitForInteractiveElements(page, 5*time.Second)
@@ -83,6 +84,12 @@ func Crawl(url string, opts Options) (*PageMap, *Browser, error) {
 	path, _ := launcher.LookPath()
 	l := launcher.New().Bin(path).Headless(true)
 
+	// Chrome refuses to start as root without --no-sandbox (common in Docker/CI);
+	// rod only adds it automatically when it detects a container
+	if os.Geteuid() == 0 {
+		l = l.NoSandbox(true)
+	}
+
 	if opts.ProfileDir != "" {
 		l = l.UserDataDir(opts.ProfileDir)
 	}
@@ -100,7 +107,7 @@ func Crawl(url string, opts Options) (*PageMap, *Browser, error) {
 
 	// Wait for network to be idle (important for SPAs)
 	// Use timeout to avoid hanging on persistent connections (WebSockets, polling, etc.)
-	page.Timeout(5 * time.Second).WaitRequestIdle(500*time.Millisecond, nil, nil, nil)()
+	page.Timeout(5*time.Second).WaitRequestIdle(500*time.Millisecond, nil, nil, nil)()
 
 	// Detect if SPA
 	isSPA := detectSPA(page)
