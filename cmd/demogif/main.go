@@ -65,6 +65,12 @@ func run(cmd *cobra.Command, args []string) error {
 	url := args[0]
 	prompt := args[1]
 
+	// GIF frame delays are in 1/100s, so above 100 FPS the delay rounds to 0;
+	// FPS <= 0 would divide by zero when computing frame intervals
+	if fps < 1 || fps > 100 {
+		return fmt.Errorf("--fps must be between 1 and 100 (got %d)", fps)
+	}
+
 	// Determine AI provider
 	selectedProvider := provider
 	if selectedProvider == "" {

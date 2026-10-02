@@ -179,6 +179,19 @@ func Execute(browser *crawler.Browser, actions []Action, opts Options) ([]image.
 	return images, positions, nil
 }
 
+// elementTimeout bounds how long an action waits for its selector to appear.
+// Without it, rod retries forever and a bad AI-generated selector hangs the run.
+const elementTimeout = 5 * time.Second
+
+// findElement looks up a selector with a bounded wait
+func findElement(page *rod.Page, selector string) (*rod.Element, error) {
+	el, err := page.Timeout(elementTimeout).Element(selector)
+	if err != nil {
+		return nil, fmt.Errorf("element not found: %s", selector)
+	}
+	return el.CancelTimeout(), nil
+}
+
 // executeActionAnimated executes an action with animated frames
 func executeActionAnimated(page *rod.Page, action Action, currentCursor CursorPosition, opts Options, frameInterval time.Duration) ([]FrameData, CursorPosition, error) {
 	switch action.Type {
@@ -194,35 +207,30 @@ func executeActionAnimated(page *rod.Page, action Action, currentCursor CursorPo
 		frames := captureWaitFrames(page, currentCursor, action.Duration, frameInterval)
 		return frames, currentCursor, nil
 	case "navigate":
-		page.MustNavigate(action.URL)
-		page.MustWaitLoad()
-		frame, _ := captureFrame(page)
-		return []FrameData{{Image: frame, Cursor: currentCursor}}, currentCursor, nil
+		if err := page.Navigate(action.URL); err != nil {
+			return nil, currentCursor, fmt.Errorf("navigate failed: %w", err)
+		}
+		if err := page.WaitLoad(); err != nil {
+			return nil, currentCursor, fmt.Errorf("page load failed: %w", err)
+		}
+		var frames []FrameData
+		if frame, err := captureFrame(page); err == nil {
+			frames = append(frames, FrameData{Image: frame, Cursor: currentCursor})
+		}
+		return frames, currentCursor, nil
 	default:
 		return nil, currentCursor, fmt.Errorf("unknown action type: %s", action.Type)
 	}
 }
 
-// executeClickAnimated performs a click with cursor movement animation
-func executeClickAnimated(page *rod.Page, action Action, currentCursor CursorPosition, opts Options, frameInterval time.Duration) ([]FrameData, CursorPosition, error) {
-	el, err := page.Element(action.Selector)
-	if err != nil {
-		return nil, currentCursor, fmt.Errorf("element not found: %s", action.Selector)
-	}
-
-	x, y, err := getElementCenter(el)
-	if err != nil {
-		return nil, currentCursor, err
-	}
-
-	var frames []FrameData
-
-	// Animate cursor movement to target (over ~0.5 seconds)
+// animateCursorMove moves the mouse from current to (x, y) with easing, capturing a frame per step
+func animateCursorMove(page *rod.Page, currentCursor CursorPosition, x, y int, state CursorState, opts Options, frameInterval time.Duration) ([]FrameData, error) {
 	movementFrames := opts.FPS / 2
 	if movementFrames < 5 {
 		movementFrames = 5
 	}
 
+	var frames []FrameData
 	for i := 0; i <= movementFrames; i++ {
 		t := float64(i) / float64(movementFrames)
 		t = easeInOutQuad(t) // Smooth easing
@@ -231,21 +239,45 @@ func executeClickAnimated(page *rod.Page, action Action, currentCursor CursorPos
 		interpY := int(float64(currentCursor.Y) + t*(float64(y)-float64(currentCursor.Y)))
 
 		// Move actual mouse
-		page.Mouse.MustMoveTo(float64(interpX), float64(interpY))
+		if err := page.Mouse.MoveTo(proto.Point{X: float64(interpX), Y: float64(interpY)}); err != nil {
+			return nil, fmt.Errorf("mouse move failed: %w", err)
+		}
 
 		frame, err := captureFrame(page)
 		if err != nil {
 			continue
 		}
 
-		cursor := CursorPosition{X: interpX, Y: interpY, State: CursorPointer}
+		cursor := CursorPosition{X: interpX, Y: interpY, State: state}
 		frames = append(frames, FrameData{Image: frame, Cursor: cursor})
 
 		time.Sleep(frameInterval / 2) // Faster for movement
 	}
+	return frames, nil
+}
+
+// executeClickAnimated performs a click with cursor movement animation
+func executeClickAnimated(page *rod.Page, action Action, currentCursor CursorPosition, opts Options, frameInterval time.Duration) ([]FrameData, CursorPosition, error) {
+	el, err := findElement(page, action.Selector)
+	if err != nil {
+		return nil, currentCursor, err
+	}
+
+	x, y, err := getElementCenter(el)
+	if err != nil {
+		return nil, currentCursor, err
+	}
+
+	// Animate cursor movement to target (over ~0.5 seconds)
+	frames, err := animateCursorMove(page, currentCursor, x, y, CursorPointer, opts, frameInterval)
+	if err != nil {
+		return nil, currentCursor, err
+	}
 
 	// Perform actual click
-	el.MustClick()
+	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return nil, currentCursor, fmt.Errorf("click failed: %w", err)
+	}
 
 	// Capture click frames (show click indicator for ~0.3 seconds)
 	clickFrames := opts.FPS / 3
@@ -267,9 +299,9 @@ func executeClickAnimated(page *rod.Page, action Action, currentCursor CursorPos
 
 // executeTypeAnimated performs typing with character-by-character animation
 func executeTypeAnimated(page *rod.Page, action Action, currentCursor CursorPosition, opts Options, frameInterval time.Duration) ([]FrameData, CursorPosition, error) {
-	el, err := page.Element(action.Selector)
+	el, err := findElement(page, action.Selector)
 	if err != nil {
-		return nil, currentCursor, fmt.Errorf("element not found: %s", action.Selector)
+		return nil, currentCursor, err
 	}
 
 	x, y, err := getElementCenter(el)
@@ -277,58 +309,43 @@ func executeTypeAnimated(page *rod.Page, action Action, currentCursor CursorPosi
 		return nil, currentCursor, err
 	}
 
-	var frames []FrameData
-
 	// Animate cursor movement to input field
-	movementFrames := opts.FPS / 2
-	if movementFrames < 5 {
-		movementFrames = 5
-	}
-
-	for i := 0; i <= movementFrames; i++ {
-		t := float64(i) / float64(movementFrames)
-		t = easeInOutQuad(t)
-
-		interpX := int(float64(currentCursor.X) + t*(float64(x)-float64(currentCursor.X)))
-		interpY := int(float64(currentCursor.Y) + t*(float64(y)-float64(currentCursor.Y)))
-
-		page.Mouse.MustMoveTo(float64(interpX), float64(interpY))
-
-		frame, err := captureFrame(page)
-		if err != nil {
-			continue
-		}
-
-		cursor := CursorPosition{X: interpX, Y: interpY, State: CursorText}
-		frames = append(frames, FrameData{Image: frame, Cursor: cursor})
-
-		time.Sleep(frameInterval / 2)
+	frames, err := animateCursorMove(page, currentCursor, x, y, CursorText, opts, frameInterval)
+	if err != nil {
+		return nil, currentCursor, err
 	}
 
 	// Click to focus
-	el.MustClick()
+	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return nil, currentCursor, fmt.Errorf("focus failed: %w", err)
+	}
 
 	// Clear existing text
-	el.MustSelectAllText()
+	if err := el.SelectAllText(); err != nil {
+		return nil, currentCursor, fmt.Errorf("select text failed: %w", err)
+	}
 
 	// Capture frame after focus
-	frame, _ := captureFrame(page)
-	frames = append(frames, FrameData{
-		Image:  frame,
-		Cursor: CursorPosition{X: x, Y: y, State: CursorText},
-	})
+	if frame, err := captureFrame(page); err == nil {
+		frames = append(frames, FrameData{
+			Image:  frame,
+			Cursor: CursorPosition{X: x, Y: y, State: CursorText},
+		})
+	}
 
 	// Type character by character
-	text := action.Text
+	runes := []rune(action.Text)
 	typingDelay := 50 * time.Millisecond // 50ms between characters
-	frameEvery := 2                       // Capture frame every N characters
+	frameEvery := 2                      // Capture frame every N characters
 
-	for i, char := range text {
+	for i, char := range runes {
 		// Type the character
-		page.Keyboard.MustType(input.Key(char))
+		if err := typeRune(page, char); err != nil {
+			return nil, currentCursor, fmt.Errorf("typing failed: %w", err)
+		}
 
 		// Capture frame every few characters
-		if i%frameEvery == 0 || i == len(text)-1 {
+		if i%frameEvery == 0 || i == len(runes)-1 {
 			time.Sleep(typingDelay)
 			frame, err := captureFrame(page)
 			if err != nil {
@@ -359,6 +376,15 @@ func executeTypeAnimated(page *rod.Page, action Action, currentCursor CursorPosi
 	return frames, CursorPosition{X: x, Y: y, State: CursorText}, nil
 }
 
+// typeRune sends printable ASCII as key events and inserts anything else
+// (accents, emoji, newlines) as text, since rod panics on keys outside its US keymap
+func typeRune(page *rod.Page, r rune) error {
+	if r >= 0x20 && r < 0x7f {
+		return page.Keyboard.Type(input.Key(r))
+	}
+	return page.InsertText(string(r))
+}
+
 // executeScrollAnimated performs scroll with animation
 func executeScrollAnimated(page *rod.Page, action Action, currentCursor CursorPosition, opts Options, frameInterval time.Duration) ([]FrameData, CursorPosition, error) {
 	var frames []FrameData
@@ -368,7 +394,9 @@ func executeScrollAnimated(page *rod.Page, action Action, currentCursor CursorPo
 	stepY := float64(action.Y) / float64(scrollSteps)
 
 	for i := 0; i < scrollSteps; i++ {
-		page.Mouse.MustScroll(stepX, stepY)
+		if err := page.Mouse.Scroll(stepX, stepY, 1); err != nil {
+			return nil, currentCursor, fmt.Errorf("scroll failed: %w", err)
+		}
 		time.Sleep(frameInterval)
 
 		frame, err := captureFrame(page)
@@ -383,9 +411,9 @@ func executeScrollAnimated(page *rod.Page, action Action, currentCursor CursorPo
 
 // executeHoverAnimated performs hover with cursor movement animation
 func executeHoverAnimated(page *rod.Page, action Action, currentCursor CursorPosition, opts Options, frameInterval time.Duration) ([]FrameData, CursorPosition, error) {
-	el, err := page.Element(action.Selector)
+	el, err := findElement(page, action.Selector)
 	if err != nil {
-		return nil, currentCursor, fmt.Errorf("element not found: %s", action.Selector)
+		return nil, currentCursor, err
 	}
 
 	x, y, err := getElementCenter(el)
@@ -393,32 +421,16 @@ func executeHoverAnimated(page *rod.Page, action Action, currentCursor CursorPos
 		return nil, currentCursor, err
 	}
 
-	var frames []FrameData
-
 	// Animate cursor movement
-	movementFrames := opts.FPS / 2
-	for i := 0; i <= movementFrames; i++ {
-		t := float64(i) / float64(movementFrames)
-		t = easeInOutQuad(t)
-
-		interpX := int(float64(currentCursor.X) + t*(float64(x)-float64(currentCursor.X)))
-		interpY := int(float64(currentCursor.Y) + t*(float64(y)-float64(currentCursor.Y)))
-
-		page.Mouse.MustMoveTo(float64(interpX), float64(interpY))
-
-		frame, err := captureFrame(page)
-		if err != nil {
-			continue
-		}
-
-		cursor := CursorPosition{X: interpX, Y: interpY, State: CursorPointer}
-		frames = append(frames, FrameData{Image: frame, Cursor: cursor})
-
-		time.Sleep(frameInterval / 2)
+	frames, err := animateCursorMove(page, currentCursor, x, y, CursorPointer, opts, frameInterval)
+	if err != nil {
+		return nil, currentCursor, err
 	}
 
 	// Trigger hover
-	el.MustHover()
+	if err := el.Hover(); err != nil {
+		return nil, currentCursor, fmt.Errorf("hover failed: %w", err)
+	}
 
 	// Capture hover state
 	for i := 0; i < opts.FPS/4; i++ {
