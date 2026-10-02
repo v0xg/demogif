@@ -12,75 +12,8 @@ import (
 // CursorSize is the size of the cursor sprite
 const CursorSize = 20
 
-// ApplyCursor draws cursor and click effects on frames
-func ApplyCursor(frames []image.Image, positions []executor.CursorPosition) ([]image.Image, error) {
-	if len(positions) == 0 {
-		return frames, nil
-	}
-
-	result := make([]image.Image, len(frames))
-
-	// Interpolate cursor positions between frames
-	interpolated := interpolatePositions(positions, len(frames))
-
-	for i, frame := range frames {
-		pos := interpolated[i]
-		result[i] = drawCursorOnFrame(frame, pos)
-	}
-
-	return result, nil
-}
-
-// interpolatePositions creates smooth cursor movement between known positions
-func interpolatePositions(positions []executor.CursorPosition, frameCount int) []executor.CursorPosition {
-	if len(positions) == 0 {
-		return make([]executor.CursorPosition, frameCount)
-	}
-
-	result := make([]executor.CursorPosition, frameCount)
-
-	// Simple approach: map positions to frames
-	for i := 0; i < frameCount; i++ {
-		// Find which position this frame corresponds to
-		posIdx := int(float64(i) / float64(frameCount) * float64(len(positions)))
-		if posIdx >= len(positions) {
-			posIdx = len(positions) - 1
-		}
-
-		currentPos := positions[posIdx]
-
-		// If not the last position, interpolate towards next
-		if posIdx < len(positions)-1 {
-			nextPos := positions[posIdx+1]
-			progress := (float64(i)/float64(frameCount)*float64(len(positions)) - float64(posIdx))
-
-			// Ease-in-out interpolation
-			progress = easeInOut(progress)
-
-			result[i] = executor.CursorPosition{
-				X:     int(float64(currentPos.X) + progress*(float64(nextPos.X)-float64(currentPos.X))),
-				Y:     int(float64(currentPos.Y) + progress*(float64(nextPos.Y)-float64(currentPos.Y))),
-				State: currentPos.State,
-				Click: currentPos.Click,
-			}
-		} else {
-			result[i] = currentPos
-		}
-	}
-
-	return result
-}
-
-// easeInOut provides smooth acceleration and deceleration
-func easeInOut(t float64) float64 {
-	if t < 0.5 {
-		return 2 * t * t
-	}
-	return 1 - math.Pow(-2*t+2, 2)/2
-}
-
-// drawCursorOnFrame creates a new image with cursor overlay
-func drawCursorOnFrame(frame image.Image, pos executor.CursorPosition) image.Image {
+// DrawCursor returns a copy of frame with the cursor (and click ripple) drawn at pos
+func DrawCursor(frame image.Image, pos executor.CursorPosition) image.Image {
 	bounds := frame.Bounds()
 	result := image.NewRGBA(bounds)
 
