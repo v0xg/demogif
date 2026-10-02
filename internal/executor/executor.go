@@ -18,28 +18,32 @@ type Options struct {
 	FPS       int
 	BaseDelay int // Base delay between actions in ms
 	Verbose   bool
+	// OnFrame receives every captured frame as soon as its action finishes,
+	// so callers can encode incrementally instead of holding the whole recording
+	OnFrame func(FrameData)
 }
 
-// FrameData holds a captured frame with its cursor state
+// FrameData holds a captured frame with its cursor state and capture time
 type FrameData struct {
 	Image  image.Image
 	Cursor CursorPosition
+	At     time.Time
 }
 
 // ExecuteResult holds the result of executing a batch of actions
 type ExecuteResult struct {
-	Frames          []image.Image
-	CursorPositions []CursorPosition
-	LastCursor      CursorPosition
-	HitCheckpoint   bool
-	CheckpointIndex int // Index of the checkpoint action that was hit (-1 if none)
+	LastCursor CursorPosition
+	// StoppedAt is the index of the action that ended the batch early
+	// (a checkpoint or a failure), or -1 if every action ran
+	StoppedAt int
+	// Err is the failure that stopped the batch, nil for a checkpoint or full run
+	Err error
 }
 
-// ExecuteBatch runs actions until a checkpoint is hit or all actions complete
-// Returns frames, positions, and whether a checkpoint was encountered
-func ExecuteBatch(browser *crawler.Browser, actions []Action, opts Options, startCursor *CursorPosition) (*ExecuteResult, error) {
+// ExecuteBatch runs actions until a checkpoint is hit, an action fails, or all actions complete.
+// A failure stops the batch so the caller can re-crawl and let the AI re-plan around it.
+func ExecuteBatch(browser *crawler.Browser, actions []Action, opts Options, startCursor *CursorPosition) *ExecuteResult {
 	page := browser.Page()
-	var frameData []FrameData
 
 	// Frame timing based on FPS
 	frameInterval := time.Duration(1000/opts.FPS) * time.Millisecond
@@ -50,8 +54,14 @@ func ExecuteBatch(browser *crawler.Browser, actions []Action, opts Options, star
 		currentCursor = *startCursor
 	}
 
-	result := &ExecuteResult{
-		CheckpointIndex: -1,
+	result := &ExecuteResult{StoppedAt: -1}
+	emit := func(frames []FrameData) {
+		if opts.OnFrame == nil {
+			return
+		}
+		for _, f := range frames {
+			opts.OnFrame(f)
+		}
 	}
 
 	for i, action := range actions {
@@ -65,7 +75,9 @@ func ExecuteBatch(browser *crawler.Browser, actions []Action, opts Options, star
 			if opts.Verbose {
 				fmt.Printf(" ✗ (%v)\n", err)
 			}
-			continue
+			result.StoppedAt = i
+			result.Err = err
+			break
 		}
 
 		if opts.Verbose {
@@ -76,107 +88,27 @@ func ExecuteBatch(browser *crawler.Browser, actions []Action, opts Options, star
 			}
 		}
 
-		frameData = append(frameData, newFrames...)
+		emit(newFrames)
 		currentCursor = newCursor
 
-		// Post-action wait with frame capture
-		waitTime := action.Duration
-		if waitTime == 0 {
-			waitTime = opts.BaseDelay
+		// Post-action wait with frame capture ("wait" actions already waited)
+		if action.Type != "wait" {
+			waitTime := action.Duration
+			if waitTime == 0 {
+				waitTime = opts.BaseDelay
+			}
+			emit(captureWaitFrames(page, currentCursor, waitTime, frameInterval))
 		}
-		waitFrames := captureWaitFrames(page, currentCursor, waitTime, frameInterval)
-		frameData = append(frameData, waitFrames...)
 
 		// If this was a checkpoint, stop and signal re-crawl needed
 		if action.Checkpoint {
-			result.HitCheckpoint = true
-			result.CheckpointIndex = i
+			result.StoppedAt = i
 			break
 		}
 	}
 
-	// Extract images and positions
-	result.Frames = make([]image.Image, len(frameData))
-	result.CursorPositions = make([]CursorPosition, len(frameData))
-	for i, fd := range frameData {
-		result.Frames[i] = fd.Image
-		result.CursorPositions[i] = fd.Cursor
-	}
 	result.LastCursor = currentCursor
-
-	return result, nil
-}
-
-// Execute runs the action sequence and captures frames with animation
-// Deprecated: Use ExecuteBatch for checkpoint support
-func Execute(browser *crawler.Browser, actions []Action, opts Options) ([]image.Image, []CursorPosition, error) {
-	page := browser.Page()
-	var frameData []FrameData
-
-	// Frame timing based on FPS
-	frameInterval := time.Duration(1000/opts.FPS) * time.Millisecond
-
-	// Current cursor position (starts at center of screen)
-	currentCursor := CursorPosition{X: 640, Y: 360, State: CursorDefault}
-
-	// Capture initial frames (hold for ~1 second)
-	initialFrames := opts.FPS // 1 second worth of frames
-	for i := 0; i < initialFrames; i++ {
-		frame, err := captureFrame(page)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to capture initial frame: %w", err)
-		}
-		frameData = append(frameData, FrameData{Image: frame, Cursor: currentCursor})
-	}
-
-	for i, action := range actions {
-		if opts.Verbose {
-			fmt.Printf("  [%d/%d] %s %s", i+1, len(actions), action.Type, action.Selector)
-		}
-
-		// Execute the action with animation
-		newFrames, newCursor, err := executeActionAnimated(page, action, currentCursor, opts, frameInterval)
-		if err != nil {
-			if opts.Verbose {
-				fmt.Printf(" ✗ (%v)\n", err)
-			}
-			continue
-		}
-
-		if opts.Verbose {
-			fmt.Println(" ✓")
-		}
-
-		frameData = append(frameData, newFrames...)
-		currentCursor = newCursor
-
-		// Post-action wait with frame capture
-		waitTime := action.Duration
-		if waitTime == 0 {
-			waitTime = opts.BaseDelay
-		}
-		waitFrames := captureWaitFrames(page, currentCursor, waitTime, frameInterval)
-		frameData = append(frameData, waitFrames...)
-	}
-
-	// Final hold frames (~1 second)
-	finalFrames := opts.FPS
-	for i := 0; i < finalFrames; i++ {
-		frame, err := captureFrame(page)
-		if err == nil {
-			frameData = append(frameData, FrameData{Image: frame, Cursor: currentCursor})
-		}
-	}
-
-	// Extract images and positions
-	images := make([]image.Image, len(frameData))
-	positions := make([]CursorPosition, len(frameData))
-	for i, fd := range frameData {
-		images[i] = fd.Image
-		positions[i] = fd.Cursor
-	}
-
-	return images, positions, nil
+	return result
 }
 
 // elementTimeout bounds how long an action waits for its selector to appear.
@@ -204,8 +136,11 @@ func executeActionAnimated(page *rod.Page, action Action, currentCursor CursorPo
 	case "hover":
 		return executeHoverAnimated(page, action, currentCursor, opts, frameInterval)
 	case "wait":
-		frames := captureWaitFrames(page, currentCursor, action.Duration, frameInterval)
-		return frames, currentCursor, nil
+		waitTime := action.Duration
+		if waitTime == 0 {
+			waitTime = opts.BaseDelay
+		}
+		return captureWaitFrames(page, currentCursor, waitTime, frameInterval), currentCursor, nil
 	case "navigate":
 		if err := page.Navigate(action.URL); err != nil {
 			return nil, currentCursor, fmt.Errorf("navigate failed: %w", err)
@@ -215,7 +150,7 @@ func executeActionAnimated(page *rod.Page, action Action, currentCursor CursorPo
 		}
 		var frames []FrameData
 		if frame, err := captureFrame(page); err == nil {
-			frames = append(frames, FrameData{Image: frame, Cursor: currentCursor})
+			frames = append(frames, FrameData{Image: frame, At: time.Now(), Cursor: currentCursor})
 		}
 		return frames, currentCursor, nil
 	default:
@@ -249,7 +184,7 @@ func animateCursorMove(page *rod.Page, currentCursor CursorPosition, x, y int, s
 		}
 
 		cursor := CursorPosition{X: interpX, Y: interpY, State: state}
-		frames = append(frames, FrameData{Image: frame, Cursor: cursor})
+		frames = append(frames, FrameData{Image: frame, At: time.Now(), Cursor: cursor})
 
 		time.Sleep(frameInterval / 2) // Faster for movement
 	}
@@ -290,7 +225,7 @@ func executeClickAnimated(page *rod.Page, action Action, currentCursor CursorPos
 			continue
 		}
 		cursor := CursorPosition{X: x, Y: y, State: CursorPointer, Click: true}
-		frames = append(frames, FrameData{Image: frame, Cursor: cursor})
+		frames = append(frames, FrameData{Image: frame, At: time.Now(), Cursor: cursor})
 		time.Sleep(frameInterval)
 	}
 
@@ -329,6 +264,7 @@ func executeTypeAnimated(page *rod.Page, action Action, currentCursor CursorPosi
 	if frame, err := captureFrame(page); err == nil {
 		frames = append(frames, FrameData{
 			Image:  frame,
+			At:     time.Now(),
 			Cursor: CursorPosition{X: x, Y: y, State: CursorText},
 		})
 	}
@@ -353,6 +289,7 @@ func executeTypeAnimated(page *rod.Page, action Action, currentCursor CursorPosi
 			}
 			frames = append(frames, FrameData{
 				Image:  frame,
+				At:     time.Now(),
 				Cursor: CursorPosition{X: x, Y: y, State: CursorText},
 			})
 		} else {
@@ -368,6 +305,7 @@ func executeTypeAnimated(page *rod.Page, action Action, currentCursor CursorPosi
 		}
 		frames = append(frames, FrameData{
 			Image:  frame,
+			At:     time.Now(),
 			Cursor: CursorPosition{X: x, Y: y, State: CursorText},
 		})
 		time.Sleep(frameInterval)
@@ -403,7 +341,7 @@ func executeScrollAnimated(page *rod.Page, action Action, currentCursor CursorPo
 		if err != nil {
 			continue
 		}
-		frames = append(frames, FrameData{Image: frame, Cursor: currentCursor})
+		frames = append(frames, FrameData{Image: frame, At: time.Now(), Cursor: currentCursor})
 	}
 
 	return frames, currentCursor, nil
@@ -440,6 +378,7 @@ func executeHoverAnimated(page *rod.Page, action Action, currentCursor CursorPos
 		}
 		frames = append(frames, FrameData{
 			Image:  frame,
+			At:     time.Now(),
 			Cursor: CursorPosition{X: x, Y: y, State: CursorPointer},
 		})
 		time.Sleep(frameInterval)
@@ -448,25 +387,21 @@ func executeHoverAnimated(page *rod.Page, action Action, currentCursor CursorPos
 	return frames, CursorPosition{X: x, Y: y, State: CursorPointer}, nil
 }
 
-// captureWaitFrames captures frames during a wait period
+// captureWaitFrames captures frames for waitMs of wall-clock time (at least one frame).
+// Bounded by time rather than frame count, since each screenshot itself takes time.
 func captureWaitFrames(page *rod.Page, cursor CursorPosition, waitMs int, frameInterval time.Duration) []FrameData {
 	var frames []FrameData
 
-	numFrames := waitMs / int(frameInterval.Milliseconds())
-	if numFrames < 1 {
-		numFrames = 1
-	}
-	if numFrames > 60 { // Cap at ~3 seconds worth
-		numFrames = 60
-	}
-
-	for i := 0; i < numFrames; i++ {
-		frame, err := captureFrame(page)
-		if err != nil {
-			continue
+	deadline := time.Now().Add(time.Duration(waitMs) * time.Millisecond)
+	for {
+		next := time.Now().Add(frameInterval)
+		if frame, err := captureFrame(page); err == nil {
+			frames = append(frames, FrameData{Image: frame, At: time.Now(), Cursor: cursor})
 		}
-		frames = append(frames, FrameData{Image: frame, Cursor: cursor})
-		time.Sleep(frameInterval)
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(time.Until(next))
 	}
 
 	return frames

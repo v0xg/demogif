@@ -58,6 +58,7 @@ The page now shows new elements. Generate the NEXT batch of actions to continue 
 - Set "checkpoint": true on actions that will change the page significantly
 - Stop at the first checkpoint
 - Use only selectors from the NEW page map provided
+- Steps marked FAILED did not take effect; achieve their goal another way using the new page map
 
 IMPORTANT: If the original user request has been fulfilled, you MUST return an empty array: []
 Do NOT generate wait actions or unnecessary clicks just to have something to do.

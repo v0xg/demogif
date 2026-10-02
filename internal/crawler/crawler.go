@@ -1,8 +1,6 @@
 package crawler
 
 import (
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -196,8 +194,20 @@ func extractElements(page *rod.Page) []Element {
 
 		// Helper to generate unique selector
 		function getSelector(el) {
+			const isUnique = (sel) => {
+				try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; }
+			};
+
 			if (el.id && isValidCSSClass(el.id)) return '#' + el.id;
-			if (el.name) return '[name="' + el.name + '"]';
+			// name alone is shared by radio groups and repeated forms, so only use it when unique
+			if (el.name) {
+				const byName = el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
+				if (isUnique(byName)) return byName;
+				if (el.value) {
+					const byValue = byName + '[value="' + CSS.escape(el.value) + '"]';
+					if (isUnique(byValue)) return byValue;
+				}
+			}
 
 			// Use class-based selector (filter out invalid CSS class names)
 			if (el.className && typeof el.className === 'string') {
@@ -363,48 +373,4 @@ func extractNavigation(page *rod.Page) []NavItem {
 	}
 
 	return navItems
-}
-
-// GetElementPosition returns the center position of an element
-func GetElementPosition(page *rod.Page, selector string) (x, y int, err error) {
-	el, err := page.Element(selector)
-	if err != nil {
-		return 0, 0, fmt.Errorf("element not found: %s", selector)
-	}
-
-	box, err := el.Shape()
-	if err != nil {
-		return 0, 0, err
-	}
-
-	if len(box.Quads) == 0 {
-		return 0, 0, fmt.Errorf("element has no shape: %s", selector)
-	}
-
-	// Get center of first quad
-	quad := box.Quads[0]
-	centerX := (quad[0] + quad[2] + quad[4] + quad[6]) / 4
-	centerY := (quad[1] + quad[3] + quad[5] + quad[7]) / 4
-
-	return int(centerX), int(centerY), nil
-}
-
-// GetElementType determines cursor type for an element
-func GetElementType(page *rod.Page, selector string) string {
-	result := page.MustEval(fmt.Sprintf(`(selector) => {
-		const el = document.querySelector(selector);
-		if (!el) return 'default';
-		const tag = el.tagName.toLowerCase();
-		const type = el.type || '';
-		if (tag === 'input' && (type === 'text' || type === 'email' || type === 'password' || type === 'search' || type === 'tel' || type === 'url' || type === '')) return 'text';
-		if (tag === 'textarea') return 'text';
-		if (tag === 'a' || tag === 'button' || el.getAttribute('role') === 'button') return 'pointer';
-		return 'default';
-	}`, escapeSelector(selector)))
-
-	return result.String()
-}
-
-func escapeSelector(s string) string {
-	return strings.ReplaceAll(s, `"`, `\"`)
 }

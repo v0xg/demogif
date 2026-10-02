@@ -6,6 +6,8 @@ import (
 	"image"
 	_ "image/png"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -17,16 +19,16 @@ import (
 )
 
 var (
-	output    string
-	fps       int
-	width     int
-	height    int
-	delay     int
-	provider  string
-	model     string
-	noCursor  bool
-	verbose   bool
-	profile   string
+	output   string
+	fps      int
+	width    int
+	height   int
+	delay    int
+	provider string
+	model    string
+	noCursor bool
+	verbose  bool
+	profile  string
 )
 
 func main() {
@@ -117,23 +119,31 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Step 3: Execute actions with checkpoint-based re-crawling
 	fmt.Println("→ Recording...")
+	// Frames are cursor-overlaid and encoded as they arrive, so the full-size
+	// screenshots never accumulate in memory
+	enc := gifgen.NewEncoder(800, fps)
+	record := func(f executor.FrameData) {
+		img := f.Image
+		if !noCursor {
+			img = overlay.DrawCursor(img, f.Cursor)
+		}
+		enc.Add(img, f.At)
+	}
+
 	execOpts := executor.Options{
 		FPS:       fps,
 		BaseDelay: delay,
 		Verbose:   verbose,
+		OnFrame:   record,
 	}
 
-	var allFrames []image.Image
-	var allCursors []executor.CursorPosition
-	var completedActions []executor.Action
+	var completedSteps []string
 	var lastCursor *executor.CursorPosition
 
 	// Capture initial hold frames
-	initialFrames, initialCursors := captureHoldFrames(browser, fps, nil)
-	allFrames = append(allFrames, initialFrames...)
-	allCursors = append(allCursors, initialCursors...)
+	captureHoldFrames(browser, fps, nil, record)
 
-	// Agentic loop: execute until checkpoint, re-crawl, continue
+	// Agentic loop: execute until checkpoint or failure, re-crawl, continue
 	maxIterations := 20 // Safety limit
 	iteration := 0
 
@@ -141,75 +151,60 @@ func run(cmd *cobra.Command, args []string) error {
 		iteration++
 
 		// Execute current batch of actions
-		result, err := executor.ExecuteBatch(browser, actions, execOpts, lastCursor)
-		if err != nil {
-			return fmt.Errorf("execution failed: %w", err)
-		}
-
-		allFrames = append(allFrames, result.Frames...)
-		allCursors = append(allCursors, result.CursorPositions...)
+		result := executor.ExecuteBatch(browser, actions, execOpts, lastCursor)
 		lastCursor = &result.LastCursor
 
-		// Track completed actions for context
-		if result.HitCheckpoint {
-			completedActions = append(completedActions, actions[:result.CheckpointIndex+1]...)
-		} else {
-			completedActions = append(completedActions, actions...)
+		// Track what ran (and what failed) as context for the AI
+		ran := actions
+		if result.StoppedAt >= 0 {
+			ran = actions[:result.StoppedAt+1]
+		}
+		for i, action := range ran {
+			if result.Err != nil && i == len(ran)-1 {
+				completedSteps = append(completedSteps, fmt.Sprintf("FAILED: %s (%v)", describeAction(action), result.Err))
+			} else {
+				completedSteps = append(completedSteps, describeAction(action))
+			}
 		}
 
-		// If we hit a checkpoint, re-crawl and ask AI to continue
-		if result.HitCheckpoint {
+		if result.StoppedAt < 0 {
+			// Ran every action without a checkpoint, we're done
+			break
+		}
+
+		// Checkpoint or failure: re-crawl and ask AI to continue
+		if result.Err != nil {
+			fmt.Printf("→ Action failed (%v), re-analyzing page... ", result.Err)
+		} else {
 			fmt.Printf("→ Checkpoint reached, re-analyzing page... ")
-			pageMap, err = browser.ReCrawl()
-			if err != nil {
-				fmt.Println("failed")
-				return fmt.Errorf("re-crawl failed: %w", err)
-			}
-			fmt.Printf("done (found %d elements)\n", len(pageMap.Elements))
-
-			// Ask AI to continue
-			fmt.Printf("→ Continuing action generation... ")
-			completedSummary := formatCompletedActions(completedActions)
-			actions, err = aiProvider.ContinueActions(pageMap, prompt, completedSummary)
-			if err != nil {
-				fmt.Println("failed")
-				return fmt.Errorf("continue generation failed: %w", err)
-			}
-			fmt.Printf("done (%d actions)\n", len(actions))
-			logActions(actions)
-		} else {
-			// No checkpoint, we're done
-			actions = nil
 		}
+		pageMap, err = browser.ReCrawl()
+		if err != nil {
+			fmt.Println("failed")
+			return fmt.Errorf("re-crawl failed: %w", err)
+		}
+		fmt.Printf("done (found %d elements)\n", len(pageMap.Elements))
+
+		fmt.Printf("→ Continuing action generation... ")
+		actions, err = aiProvider.ContinueActions(pageMap, prompt, formatCompletedSteps(completedSteps))
+		if err != nil {
+			fmt.Println("failed")
+			return fmt.Errorf("continue generation failed: %w", err)
+		}
+		fmt.Printf("done (%d actions)\n", len(actions))
+		logActions(actions)
 	}
 
-	if iteration >= maxIterations {
+	if iteration >= maxIterations && len(actions) > 0 {
 		fmt.Println("⚠ Max iterations reached, stopping")
 	}
 
 	// Capture final hold frames
-	finalFrames, finalCursors := captureHoldFrames(browser, fps, lastCursor)
-	allFrames = append(allFrames, finalFrames...)
-	allCursors = append(allCursors, finalCursors...)
+	captureHoldFrames(browser, fps, lastCursor, record)
 
-	// Step 4: Apply cursor overlay
-	if !noCursor {
-		fmt.Printf("→ Applying cursor overlay... ")
-		allFrames, err = overlay.ApplyCursor(allFrames, allCursors)
-		if err != nil {
-			fmt.Println("failed")
-			return fmt.Errorf("overlay failed: %w", err)
-		}
-		fmt.Println("done")
-	}
-
-	// Step 5: Generate GIF
-	fmt.Printf("→ Generating GIF (%d frames)... ", len(allFrames))
-	gifOpts := gifgen.Options{
-		FPS:      fps,
-		MaxWidth: 800,
-	}
-	fileSize, err := gifgen.Generate(allFrames, output, gifOpts)
+	// Step 4: Write GIF
+	fmt.Printf("→ Writing GIF (%d frames)... ", enc.Len())
+	fileSize, err := enc.Write(output)
 	if err != nil {
 		fmt.Println("failed")
 		return fmt.Errorf("GIF generation failed: %w", err)
@@ -243,59 +238,59 @@ func logActions(actions []executor.Action) {
 	}
 }
 
-// formatCompletedActions creates a summary of completed actions for the AI
-func formatCompletedActions(actions []executor.Action) string {
-	var lines []string
-	for i, action := range actions {
-		switch action.Type {
-		case "type":
-			lines = append(lines, fmt.Sprintf("%d. Typed %q into %s", i+1, action.Text, action.Selector))
-		case "click":
-			lines = append(lines, fmt.Sprintf("%d. Clicked %s", i+1, action.Selector))
-		case "navigate":
-			lines = append(lines, fmt.Sprintf("%d. Navigated to %s", i+1, action.URL))
-		case "hover":
-			lines = append(lines, fmt.Sprintf("%d. Hovered over %s", i+1, action.Selector))
-		case "scroll":
-			lines = append(lines, fmt.Sprintf("%d. Scrolled by (%d, %d)", i+1, action.X, action.Y))
-		case "wait":
-			lines = append(lines, fmt.Sprintf("%d. Waited %dms", i+1, action.Duration))
-		}
+// describeAction summarizes an action for the AI's completed-steps context
+func describeAction(action executor.Action) string {
+	switch action.Type {
+	case "type":
+		return fmt.Sprintf("Typed %q into %s", action.Text, action.Selector)
+	case "click":
+		return fmt.Sprintf("Clicked %s", action.Selector)
+	case "navigate":
+		return fmt.Sprintf("Navigated to %s", action.URL)
+	case "hover":
+		return fmt.Sprintf("Hovered over %s", action.Selector)
+	case "scroll":
+		return fmt.Sprintf("Scrolled by (%d, %d)", action.X, action.Y)
+	case "wait":
+		return fmt.Sprintf("Waited %dms", action.Duration)
+	default:
+		return fmt.Sprintf("%s %s", action.Type, action.Selector)
 	}
-	result := ""
-	for _, line := range lines {
-		result += line + "\n"
-	}
-	return result
 }
 
-// captureHoldFrames captures frames for hold periods (start/end of GIF)
-func captureHoldFrames(browser *crawler.Browser, targetFPS int, cursor *executor.CursorPosition) ([]image.Image, []executor.CursorPosition) {
+// formatCompletedSteps numbers the completed steps for the AI
+func formatCompletedSteps(steps []string) string {
+	var b strings.Builder
+	for i, step := range steps {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, step)
+	}
+	return b.String()
+}
+
+// captureHoldFrames records ~1 second of still frames (start/end of GIF)
+func captureHoldFrames(browser *crawler.Browser, targetFPS int, cursor *executor.CursorPosition, record func(executor.FrameData)) {
 	page := browser.Page()
-	numFrames := targetFPS // 1 second worth
 
 	defaultCursor := executor.CursorPosition{X: 640, Y: 360, State: executor.CursorDefault}
 	if cursor != nil {
 		defaultCursor = *cursor
 	}
 
-	var frames []image.Image
-	var cursors []executor.CursorPosition
-
-	for i := 0; i < numFrames; i++ {
+	interval := time.Second / time.Duration(targetFPS)
+	deadline := time.Now().Add(time.Second)
+	for {
+		next := time.Now().Add(interval)
 		data, err := page.Screenshot(false, nil)
-		if err != nil {
-			continue
+		if err == nil {
+			if img, _, err := image.Decode(bytes.NewReader(data)); err == nil {
+				record(executor.FrameData{Image: img, Cursor: defaultCursor, At: time.Now()})
+			}
 		}
-		img, _, err := image.Decode(bytes.NewReader(data))
-		if err != nil {
-			continue
+		if !time.Now().Before(deadline) {
+			return
 		}
-		frames = append(frames, img)
-		cursors = append(cursors, defaultCursor)
+		time.Sleep(time.Until(next))
 	}
-
-	return frames, cursors
 }
 
 func logVerbose(format string, args ...interface{}) {
