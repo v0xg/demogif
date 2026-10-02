@@ -12,10 +12,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 go build -o demogif ./cmd/demogif          # build (binary is gitignored)
 go run ./cmd/demogif "<url>" "<prompt>" -v # run with verbose logging
 go vet ./...
-go test ./...                              # only internal/gifgen has tests so far; single test: go test ./internal/gifgen -run TestFrameDelays
+go test ./...                              # browser tests (crawler, executor) need local Chrome/Chromium
+go test -short ./...                       # skip browser tests
+go test ./internal/executor -run TestExecuteBatchStopsAtCheckpoint  # single test
 ```
 
 Running requires a Chrome/Chromium binary (found via `launcher.LookPath`) and an API key: `ANTHROPIC_API_KEY` (or `DEMOGIF_ANTHROPIC_KEY`) for Claude, `OPENAI_API_KEY` (or `DEMOGIF_OPENAI_KEY`) for OpenAI. `DEMOGIF_DEFAULT_PROVIDER` picks the provider when `--provider` is omitted. A `.env` file is auto-loaded via godotenv.
+
+CI (`.github/workflows/ci.yml`) runs gofmt, build, vet and `go test -race` on PRs and `main`, so keep code gofmt-clean.
 
 Releases: pushing a `v*` tag runs GoReleaser (`.goreleaser.yaml`), which builds cross-platform binaries and updates the `v0xg/homebrew-tap` formula. `main.version` is set via ldflags.
 

@@ -132,6 +132,7 @@ func (p *ClaudeProvider) ContinueActions(pageMap *crawler.PageMap, originalPromp
 }
 
 // parseActionsJSON extracts and parses a JSON array from a response that may contain surrounding text
+// (markdown fences, a preamble that itself contains brackets, trailing commentary)
 func parseActionsJSON(response string) ([]executor.Action, error) {
 	// First try direct parsing
 	var actions []executor.Action
@@ -139,39 +140,25 @@ func parseActionsJSON(response string) ([]executor.Action, error) {
 		return actions, nil
 	}
 
-	// Find JSON array in response (look for [ ... ])
-	start := strings.Index(response, "[")
-	if start == -1 {
+	// Try each '[' as a candidate start; the decoder stops after one complete
+	// value and handles brackets inside strings (e.g. selectors like input[name="q"])
+	found := false
+	var lastErr error
+	for i := 0; i < len(response); i++ {
+		if response[i] != '[' {
+			continue
+		}
+		found = true
+		var candidate []executor.Action
+		if err := json.NewDecoder(strings.NewReader(response[i:])).Decode(&candidate); err != nil {
+			lastErr = err
+			continue
+		}
+		return candidate, nil
+	}
+
+	if !found {
 		return nil, fmt.Errorf("no JSON array found in response")
 	}
-
-	// Find matching closing bracket
-	depth := 0
-	end := -1
-	for i := start; i < len(response); i++ {
-		switch response[i] {
-		case '[':
-			depth++
-		case ']':
-			depth--
-			if depth == 0 {
-				end = i + 1
-				break
-			}
-		}
-		if end != -1 {
-			break
-		}
-	}
-
-	if end == -1 {
-		return nil, fmt.Errorf("no matching closing bracket found")
-	}
-
-	jsonStr := response[start:end]
-	if err := json.Unmarshal([]byte(jsonStr), &actions); err != nil {
-		return nil, fmt.Errorf("failed to parse extracted JSON: %w", err)
-	}
-
-	return actions, nil
+	return nil, fmt.Errorf("failed to parse extracted JSON: %w", lastErr)
 }
